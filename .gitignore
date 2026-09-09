@@ -1,0 +1,5 @@
+*.star
+*.mrc
+__pycache__/
+*.pyc
+.pytest_cache/
