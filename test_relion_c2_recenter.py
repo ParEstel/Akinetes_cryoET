@@ -104,7 +104,17 @@ def make_synthetic_star(path, rows):
     write_star(sf, path)
 
 
-def make_c2geom_file(path, axis, dyad, centroid_A, centroid_B, R_rel, separation):
+def make_c2geom_file(path, axis, dyad, centroid_A, centroid_B, R_rel, separation,
+                      box_centre_scene=(0.0, 0.0, 0.0)):
+    """NOTE: dyad/centroid_A/centroid_B here are written as RAW SCENE
+    coordinates (i.e. corner-anchored, matching what c2geom.py actually
+    reports), with `box_centre_scene` given separately -- matching the
+    real file format after the fix. Callers that want the OLD
+    (particle-space-already) behaviour should pass box_centre_scene as
+    exactly the same value they'd otherwise have folded into
+    dyad/centroid_A/centroid_B, or simply leave it at the default zero,
+    which makes scene coordinates and particle-space coordinates
+    identical -- this is what all the pre-existing tests below rely on."""
     with open(path, "w") as fh:
         fh.write(f"axis = {axis[0]:.8f} {axis[1]:.8f} {axis[2]:.8f}\n")
         fh.write(f"dyad_point = {dyad[0]:.8f} {dyad[1]:.8f} {dyad[2]:.8f}\n")
@@ -112,6 +122,8 @@ def make_c2geom_file(path, axis, dyad, centroid_A, centroid_B, R_rel, separation
         fh.write(f"centroid_B = {centroid_B[0]:.8f} {centroid_B[1]:.8f} {centroid_B[2]:.8f}\n")
         fh.write("R_rel = " + " ".join(f"{x:.8f}" for x in R_rel.ravel()) + "\n")
         fh.write(f"centroid_separation_angstrom = {separation:.8f}\n")
+        fh.write(f"map_box_centre_scene = {box_centre_scene[0]:.8f} "
+                 f"{box_centre_scene[1]:.8f} {box_centre_scene[2]:.8f}\n")
 
 
 def parse_particles_table(path):
@@ -397,3 +409,83 @@ def test_unique_names_never_collide():
     _name_counter.clear()
     names = [unique_particle_name("tomo1/1") for _ in range(5)]
     assert len(set(names)) == 5
+
+
+def test_box_centre_conversion_catches_the_real_bug(tmp_path):
+    """
+    Regression test for the bug found via Sean's extract-and-reconstruct
+    sanity check (see module docstring section 6): c2geom.py reports
+    dyad_point/centroid_A/centroid_B as RAW, corner-anchored ChimeraX
+    scene coordinates, NOT already relative to the box centre. This test
+    builds a c2geom result file the way the REAL file actually looks
+    (large box, nonzero box centre, scene coords = grid_index * voxel
+    size) and checks that load_c2geom_result correctly converts to
+    particle-space -- i.e. that the loaded values equal (raw_scene -
+    box_centre), not the raw scene values themselves.
+    """
+    from relion_c2_recenter import load_c2geom_result
+
+    voxel = 6.52
+    box_voxels = 128
+    box_centre_scene = np.array([box_voxels // 2 * voxel] * 3)  # matches
+    # RELION's own (int)w/2 convention, per particle_set.cpp's Tc matrix
+
+    # a realistic dyad sitting near, but not exactly at, the box centre in
+    # grid-index terms (65, 63, 68) -- taken directly from the real run
+    # that exposed this bug
+    dyad_grid_index = np.array([65.028, 63.217, 67.739])
+    dyad_scene_raw = dyad_grid_index * voxel  # corner-anchored, as c2geom reports
+
+    centroid_A_grid = np.array([60.0, 70.0, 65.0])
+    centroid_B_grid = np.array([70.0, 56.0, 71.0])
+    centroid_A_scene_raw = centroid_A_grid * voxel
+    centroid_B_scene_raw = centroid_B_grid * voxel
+
+    axis = np.array([0.8, -0.4, -0.4]); axis /= np.linalg.norm(axis)
+    R_rel = np.eye(3)  # not exercised by this test
+
+    c2_path = tmp_path / "c2.txt"
+    make_c2geom_file(
+        str(c2_path), axis, dyad_scene_raw, centroid_A_scene_raw, centroid_B_scene_raw,
+        R_rel, separation=237.0, box_centre_scene=tuple(box_centre_scene),
+    )
+
+    loaded = load_c2geom_result(str(c2_path))
+
+    # The loaded values MUST be particle-space (centre-relative), i.e.
+    # raw_scene - box_centre_scene -- NOT the raw scene values themselves.
+    assert np.allclose(loaded["dyad_point"], dyad_scene_raw - box_centre_scene, atol=1e-6)
+    assert np.allclose(loaded["centroid_A"], centroid_A_scene_raw - box_centre_scene, atol=1e-6)
+    assert np.allclose(loaded["centroid_B"], centroid_B_scene_raw - box_centre_scene, atol=1e-6)
+
+    # Sanity: the bug this guards against would have left these equal to
+    # the RAW scene values instead -- explicitly confirm we are NOT in
+    # that (buggy) state, so a future regression can't silently pass by
+    # both sides of the assertion drifting together.
+    assert not np.allclose(loaded["dyad_point"], dyad_scene_raw, atol=1.0)
+
+    # axis must be UNCHANGED by this conversion (it's a direction, not a
+    # position -- translating the reference point never changes a
+    # direction)
+    assert np.allclose(loaded["axis"], axis, atol=1e-9)
+
+
+def test_old_format_c2geom_file_is_rejected_not_silently_wrong(tmp_path):
+    """A c2geom result file saved before the box-centre fix (missing
+    `map_box_centre_scene`) must fail loudly, not silently reproduce the
+    bug by treating raw scene coordinates as already particle-space."""
+    from relion_c2_recenter import load_c2geom_result
+
+    old_style_path = tmp_path / "old_c2.txt"
+    with open(old_style_path, "w") as fh:
+        fh.write("axis = 0.8 -0.4 -0.4\n")
+        fh.write("dyad_point = 423.981 412.173 441.656\n")
+        fh.write("centroid_A = 392.291 453.353 335.017\n")
+        fh.write("centroid_B = 454.808 369.686 548.037\n")
+        fh.write("R_rel = 1 0 0 0 1 0 0 0 1\n")
+        fh.write("centroid_separation_angstrom = 237.246\n")
+        # deliberately NO map_box_centre_scene line -- simulates an
+        # old-format file
+
+    with pytest.raises(ValueError, match="map_box_centre_scene"):
+        load_c2geom_result(str(old_style_path))

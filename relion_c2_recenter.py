@@ -266,6 +266,46 @@ building a graph of all pairwise "same dimer" edges and taking CONNECTED
 COMPONENTS, not just first-pair-found, so three mutually-linked (or
 transitively linked) picks are grouped correctly even if not every pair
 individually clears the threshold.
+
+
+6. A REAL BUG FOUND VIA THE EXTRACT-AND-RECONSTRUCT SANITY CHECK
+--------------------------------------------------------------------
+An early version of this script took `c2geom`'s reported `dyad_point`,
+`centroid_A`, `centroid_B` (all in ChimeraX SCENE coordinates) and used
+them directly as RELION "particle space" vectors in the recentring
+formula (section 3). This is wrong, and the error is large, not subtle.
+
+ChimeraX scene coordinates for a freshly-opened MRC map are anchored at
+grid index (0,0,0) -- the box CORNER -- i.e. `scene = origin_local +
+grid_index * voxel_size`. RELION's own convention (again from
+`particle_set.cpp`'s `getMatrix4x4`, the `Tc` matrix: `int cx =
+((int)w)/2; ... Tc(1,0,0,-cx, 0,1,0,-cy, 0,0,1,-cz, 0,0,0,1)`) defines
+particle-space offsets relative to the box's GEOMETRIC CENTRE, not its
+corner. These are two different points -- for a 128-voxel box at
+6.52 A/px, roughly 417 A apart in each dimension, comparable to half the
+entire box width.
+
+Using the uncorrected corner-anchored value as if it were already
+centre-relative shifts every recentred particle by approximately that
+much in the wrong reference frame -- large enough that the extracted,
+reconstructed particles come out looking like pure noise, which is
+exactly what happened the first time this was tested end-to-end against
+real RELION output (per Sean's suggested extract-and-reconstruct sanity
+check -- see the lab note). This was NOT caught by the original pytest
+suite, because those tests worked in an abstract coordinate space and
+never modelled a real map's corner-anchored scene origin -- a genuine gap
+in test coverage, not just an implementation bug. `test_box_centre_conversion`
+below was added specifically to close that gap.
+
+FIX: `c2geom.py` now also reports `map_box_centre_scene` -- the box's own
+geometric centre, computed the same way (`origin_local + (grid_size // 2)
+* voxel_size`, then mapped through the map's own `scene_position`) --
+and `load_c2geom_result()` here subtracts it from `dyad_point`,
+`centroid_A`, and `centroid_B` before anything else uses them. `axis` is
+a direction, not a position, and is deliberately left unchanged (a
+direction is invariant to where you measure it from). Result files saved
+by the old version of `c2geom.py` (missing `map_box_centre_scene`) are
+now rejected with a loud error rather than silently reproducing the bug.
 """
 
 from __future__ import annotations
@@ -508,11 +548,52 @@ def load_c2geom_result(path):
                 out[k] = v
                 continue
             out[k] = nums[0] if len(nums) == 1 else np.array(nums)
-    for key in ("axis", "dyad_point", "centroid_A", "centroid_B", "R_rel"):
-        if key in out and isinstance(out[key], np.ndarray) and key != "R_rel":
-            pass  # already a flat vector
     if "R_rel" in out and isinstance(out["R_rel"], np.ndarray):
         out["R_rel"] = out["R_rel"].reshape(3, 3)
+
+    # ------------------------------------------------------------------
+    # CRITICAL CONVERSION -- corner-anchored scene coords -> RELION's
+    # box-centre-relative "particle space" convention.
+    #
+    # ChimeraX scene coordinates for a freshly-opened MRC map are anchored
+    # at grid index (0,0,0) (the box CORNER), i.e. scene = origin_local +
+    # grid_index * voxel_size. RELION's own convention (confirmed from
+    # particle_set.cpp's getMatrix4x4, the Tc matrix: "int cx = ((int)w)/2;
+    # ... Tc(1,0,0,-cx, ...)") defines particle-space offsets relative to
+    # the box's GEOMETRIC CENTRE, not the corner. These are NOT the same
+    # point -- for a 128-voxel box at 6.52 A/px the difference is ~417 A,
+    # comparable to half the whole box. Feeding raw scene coordinates
+    # directly into the recentring formulas as if they were already
+    # centre-relative was a real bug in an earlier version of this script,
+    # caught only once real extracted/reconstructed particles came back
+    # looking like noise (a Class3D/Refine3D sanity check, not a unit
+    # test -- see the added pytest test below, which now exercises this
+    # exact seam with a non-trivial map origin/box size).
+    #
+    # `c2geom.py` (from the version that produced this saveFile) reports
+    # `map_box_centre_scene`, computed the same way: origin_local +
+    # (grid_size // 2) * voxel_size, then mapped through the map's own
+    # scene_position -- i.e. exactly the point that must be subtracted.
+    # Older c2geom result files (saved before this fix) will not have this
+    # key; fail loudly rather than silently reproducing the bug.
+    # ------------------------------------------------------------------
+    if "map_box_centre_scene" not in out:
+        raise ValueError(
+            "c2geom result file has no 'map_box_centre_scene' entry -- it "
+            "was saved by an older version of c2geom.py that did not "
+            "report the map's box centre. Re-run c2geom in ChimeraX with "
+            "the updated c2geom.py and re-save (saveFile=...) before using "
+            "this file here. Using the old file directly would silently "
+            "reproduce a confirmed ~box-centre-sized (hundreds of "
+            "Angstrom) offset error."
+        )
+    centre = np.asarray(out["map_box_centre_scene"], dtype=float)
+    for key in ("dyad_point", "centroid_A", "centroid_B"):
+        if key in out and isinstance(out[key], np.ndarray):
+            out[key] = out[key] - centre
+    # NOTE: `axis` is a direction, not a position -- translating the
+    # reference point never changes a direction, so it is deliberately
+    # NOT adjusted here.
     return out
 
 

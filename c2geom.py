@@ -380,6 +380,24 @@ def c2geom(session, map, monomerA, monomerB, saveFile=None):
     dyad_ijk = (dyad_local - origin) / step
     result["dyad_point_grid_index"] = dyad_ijk
 
+    # Map box size and the SCENE-coordinate position of the box's own
+    # geometric centre, needed downstream to convert these (corner-
+    # anchored) scene coordinates into RELION's box-centre-relative
+    # "particle space" convention (see relion_c2_recenter.py). ChimeraX
+    # scene coordinates for a freshly-opened MRC are anchored at grid
+    # index (0,0,0), NOT the box centre -- these two are NOT the same
+    # point in general, and conflating them was a real bug caught by
+    # testing this pipeline against real data (see relion_c2_recenter.py
+    # module docstring, section 6).
+    grid_size = np.array(map.data.matrix().shape[::-1], dtype=float)  # (nk,nj,ni) -> (ni,nj,nk)
+    box_centre_index = (grid_size // 2)  # RELION's own (int)w/2 convention
+    box_centre_local = map.data.origin + box_centre_index * step
+    box_centre_scene = map.scene_position.transform_points(
+        np.asarray(box_centre_local, dtype=float).reshape(1, 3)
+    )[0]
+    result["map_grid_size"] = grid_size
+    result["map_box_centre_scene"] = box_centre_scene
+
     _report(logger, result, isotropic)
 
     if saveFile:
@@ -406,6 +424,9 @@ def _report(logger, r, isotropic):
     lines.append(f"  perp-part residual     : {r['dyad_equation_residual']:.2e} A "
                  "(implementation check, always ~0; NOT the same as axial shift -- see docstring)")
     lines.append(f"dyad point (map grid ijk): {np.array2string(r['dyad_point_grid_index'], precision=3)}")
+    lines.append(f"map grid size            : {np.array2string(r['map_grid_size'], precision=0)}")
+    lines.append(f"map box centre (scene)   : {np.array2string(r['map_box_centre_scene'], precision=3)} "
+                 "(needed downstream to convert scene coords to RELION particle-space)")
     lines.append("")
     lines.append(f"centroid A (scene)       : {np.array2string(r['centroid_A'], precision=3)}")
     lines.append(f"centroid B (scene)       : {np.array2string(r['centroid_B'], precision=3)}")
