@@ -2,109 +2,178 @@
 plot_tilt_removal_histogram.py
 ===============================
 
-Histogram of TOTAL tilt images removed per tilt-series (TS) in this
-project's AreTomo3 preprocessing -- combining both removal reasons into
-one per-TS count:
+WHAT THIS SCRIPT DOES (plain-English summary)
+-----------------------------------------------
+During tilt-series alignment (AreTomo3), some of the individual tilt
+images in each tilt-series get thrown away, for two reasons:
 
-    - dark images   (AreTomo3's own `-DarkTol` frame exclusion)
-    - low overlap   (post-alignment frames whose overlap with neighbouring
-                      tilts fell below the QC threshold -- 80% in this
-                      project)
+    1. "dark" images   -- the image was blank/black (e.g. the beam was
+                           blanked, or the stage was moving), so AreTomo3
+                           discards it automatically.
+    2. "low overlap"    -- after alignment, the image didn't line up well
+                           enough with its neighbours (less than 80% of
+                           the image area overlapped), so it was flagged
+                           as unreliable.
 
-Styled to match the lab's existing "Removed tilts" QC panel: plain grey
-bars, a dashed vertical line at the median, x-axis ticked every 3 tilts.
+This script counts, for every tilt-series, how many tilt images were
+thrown away in total (reason 1 + reason 2 added together), and then
+draws a histogram: a bar chart showing "how many tilt-series lost 0
+tilts, how many lost 1 tilt, how many lost 2 tilts", and so on. This
+makes it easy to see at a glance whether most tilt-series are healthy
+(losing very few tilts) or whether a lot of data had to be thrown away.
 
-DATA SOURCE, CONFIRMED AGAINST THIS PROJECT'S OWN FILES
---------------------------------------------------------
-`aretomo3_project.json`'s `analyse` block records the
-`aretomo3-preprocess analyse` step (run002-cmd1-tc1-1880/analyse), whose
-own `args.threshold` is 80.0 -- i.e. the 80% overlap cutoff is this
-project's actual QC setting, not an assumed default. That block's
-`per_ts_qc` list has one entry per tilt series with, among other fields:
+The chart also draws a dashed vertical line at the MEDIAN (the middle
+value, if you lined up every tilt-series worst-to-best) so you have a
+single "typical" number to quote, not just a wall of bars.
 
-    name      -- e.g. "ts-001"
-    n_dark    -- count of frames AreTomo3 removed as dark for this TS
-    n_bad     -- count of frames flagged with overlap_pct below the
-                 `threshold` above (see the sibling `flagged_frames.tsv`
-                 in the same analyse output dir, which lists these by
-                 name/section/overlap_pct and was used to derive n_bad)
+WHERE THE NUMBERS COME FROM
+-----------------------------
+All of this is read out of one file that AreTomo3's preprocessing
+already produced: `aretomo3_project.json`. Inside it, there's a section
+called "analyse" that already lists, for every tilt-series, how many
+tilts were dropped for each reason (fields named `n_dark` and `n_bad`).
+We simply add those two numbers together for each tilt-series.
 
-Dark frames are excluded by AreTomo3 before overlap is even computed (see
-the per-series `.aln` files' `# DarkFrame = ...` header lines vs. this
-project's `flagged_frames.tsv` -- no section index appears in both), so
-`n_dark` and `n_bad` are counting disjoint sets of frames and are summed
-here (`n_dark + n_bad`) into one total-removed-per-TS count without
-double-counting.
+Tilt-series that lost ZERO tilts are left out of the chart on purpose,
+to match how this lab has reported this number before (a tilt-series
+with a perfect score doesn't need to be in a "how bad was it" plot).
 
-USAGE
------
-    python3 plot_tilt_removal_histogram.py \\
-        --i aretomo3_project.json \\
-        --o tilt_removal_histogram.png
+HOW TO RUN THIS SCRIPT
+-------------------------
+From a terminal, inside the project folder that contains
+`aretomo3_project.json`, run:
+
+    python3 plot_tilt_removal_histogram.py
+
+That's it -- it will read `aretomo3_project.json` in the current folder
+and write a picture called `tilt_removal_histogram.png` next to it.
+
+If your file has a different name or is somewhere else, tell the script
+where to look and what to call the picture:
+
+    python3 plot_tilt_removal_histogram.py --i path/to/aretomo3_project.json --o my_picture.png
 """
 
-from __future__ import annotations
-import argparse
-import json
-import numpy as np
+# These lines "import" (load) the extra tools this script needs.
+import argparse   # lets the script understand --i and --o typed on the command line
+import json       # lets the script read .json files
+import numpy as np  # a toolkit for doing maths on lists of numbers quickly
+
+# matplotlib is the tool that actually draws the chart and saves it as a PNG picture.
 import matplotlib
-matplotlib.use("Agg")  # safe on a headless HPC node; still writes the PNG fine
+matplotlib.use("Agg")  # tells matplotlib to just save a file, not try to pop up a window
 import matplotlib.pyplot as plt
 
-BAR_COLOR = "#808080"
-MEDIAN_COLOR = "#000000"
+# The colours used in the chart, as "hex codes" (a standard way of writing colours).
+# Feel free to change these if you want a different look.
+BAR_COLOR = "#808080"     # grey, used for the histogram bars
+MEDIAN_LINE_COLOR = "#000000"  # black, used for the dashed median line
 
 
-def load_per_ts_qc(path):
-    with open(path) as fh:
-        d = json.load(fh)
-    analyse = d.get("analyse")
-    if analyse is None or "per_ts_qc" not in analyse:
+def get_tilts_removed_per_tilt_series(json_path):
+    """
+    Opens the aretomo3_project.json file and pulls out, for every tilt
+    series, how many tilt images were removed in total.
+
+    Returns two things:
+      - a list of numbers (one per tilt-series: how many tilts it lost)
+      - the overlap threshold (e.g. 80.0, meaning "80%") that was used
+        when deciding which images counted as "low overlap"
+    """
+    with open(json_path) as f:
+        project_data = json.load(f)
+
+    # The per-tilt-series numbers live inside project_data["analyse"]["per_ts_qc"].
+    analyse_section = project_data.get("analyse")
+    if analyse_section is None or "per_ts_qc" not in analyse_section:
         raise ValueError(
-            f"{path}: no 'analyse.per_ts_qc' block found -- this does not "
-            f"look like this project's aretomo3_project.json (or the "
-            f"'analyse' preprocessing step has not been run)."
+            f"Could not find the expected data inside {json_path}. "
+            f"Make sure this is the right aretomo3_project.json file, and "
+            f"that the 'analyse' step has already been run."
         )
-    threshold = analyse.get("args", {}).get("threshold")
-    return analyse["per_ts_qc"], threshold
+
+    per_tilt_series_info = analyse_section["per_ts_qc"]
+    overlap_threshold = analyse_section.get("args", {}).get("threshold")
+
+    # For each tilt series, add "dark images removed" + "low-overlap images
+    # removed" together to get one total number for that tilt series.
+    totals = []
+    for one_tilt_series in per_tilt_series_info:
+        dark_count = one_tilt_series["n_dark"]
+        low_overlap_count = one_tilt_series["n_bad"]
+        totals.append(dark_count + low_overlap_count)
+
+    return totals, overlap_threshold
 
 
-def main(argv=None):
-    p = argparse.ArgumentParser(description=__doc__,
-                                 formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--i", default="aretomo3_project.json", help="path to aretomo3_project.json")
-    p.add_argument("--o", default="tilt_removal_histogram.png", help="output image path")
-    args = p.parse_args(argv)
+def main():
+    # --- Read what the user typed on the command line (or use the defaults) ---
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--i", default="aretomo3_project.json",
+                         help="the input file to read (default: aretomo3_project.json)")
+    parser.add_argument("--o", default="tilt_removal_histogram.png",
+                         help="the filename to save the picture as")
+    args = parser.parse_args()
 
-    qc, threshold = load_per_ts_qc(args.i)
-    total_removed_all = np.array([ts["n_dark"] + ts["n_bad"] for ts in qc])
-    # Only TS with >=1 removed tilt are plotted/counted, matching this lab's
-    # existing "Removed tilts (n=... TS)" QC panel convention.
-    total_removed = total_removed_all[total_removed_all > 0]
-    n_ts = len(total_removed)
-    median = np.median(total_removed)
+    # --- Step 1: get the data ---
+    all_totals, overlap_threshold = get_tilts_removed_per_tilt_series(args.i)
 
-    max_count = int(total_removed.max())
-    bins = np.arange(0, max_count + 2) - 0.5  # integer-centred bins, one per tilt count
+    # Only keep tilt-series that lost at least 1 tilt (see docstring above
+    # for why) -- this matches how the lab has plotted this before.
+    totals_to_plot = [t for t in all_totals if t > 0]
+    number_of_tilt_series = len(totals_to_plot)
+    worst_case = max(totals_to_plot)
+    median_value = float(np.median(totals_to_plot))
 
-    fig, ax = plt.subplots(figsize=(5, 4))
-    ax.hist(total_removed, bins=bins, color=BAR_COLOR, edgecolor="black", linewidth=0.5)
-    ax.axvline(median, color=MEDIAN_COLOR, linestyle="--", linewidth=1.2,
-               label=f"Median = {median:.0f}")
+    # --- Step 2: decide how to divide the x-axis into bars ("bins") ---
+    # We want one bar per possible whole number of tilts removed: 1, 2, 3, ...
+    # up to the worst case seen. np.arange makes a list of numbers, and the
+    # "-0.5" shifts the bar edges so each bar is centred ON its number
+    # instead of starting at it (this is just a cosmetic/plotting detail).
+    bin_edges = np.arange(0, worst_case + 2) - 0.5
 
+    # --- Step 3: draw the chart ---
+    fig, ax = plt.subplots(figsize=(5, 4))  # figsize is the picture size in inches
+
+    ax.hist(
+        totals_to_plot,
+        bins=bin_edges,
+        color=BAR_COLOR,
+        edgecolor="black",   # a thin black outline around each bar, for clarity
+        linewidth=0.5,
+    )
+
+    # Draw a dashed vertical line at the median, with a label for the legend.
+    ax.axvline(
+        median_value,
+        color=MEDIAN_LINE_COLOR,
+        linestyle="--",
+        linewidth=1.2,
+        label=f"Median = {median_value:.0f}",
+    )
+
+    # --- Step 4: add titles, axis labels, and other text ---
     ax.set_xlabel("Tilts removed per TS")
     ax.set_ylabel("Number of tilt-series")
-    ax.set_title(f"Removed tilts\n(n={n_ts} TS, thresh={threshold:.0f}%)")
-    ax.set_xlim(-1, max_count + 1)
-    ax.set_xticks(np.arange(0, max_count + 1, 3))
-    ax.legend(frameon=False)
+    ax.set_title(f"Removed tilts\n(n={number_of_tilt_series} TS, thresh={overlap_threshold:.0f}%)")
+    ax.set_xlim(-1, worst_case + 1)
+    ax.set_xticks(np.arange(0, worst_case + 1, 3))  # a tick mark every 3 tilts
+    ax.legend(frameon=False)  # shows the "Median = ..." label, no box around it
 
-    fig.tight_layout()
-    fig.savefig(args.o, dpi=200)
+    # --- Step 5: save the picture to disk ---
+    fig.tight_layout()  # shrinks margins so nothing gets cut off
+    fig.savefig(args.o, dpi=200)  # dpi=200 controls how sharp/high-resolution the image is
     print(f"Saved plot to {args.o}")
-    print(f"total removed per TS: mean {total_removed.mean():.2f}, median {median:.0f}, "
-          f"max {max_count}, {(total_removed > 0).sum()}/{n_ts} TS with >=1 removed")
+
+    # Also print a short plain-text summary to the terminal, for a quick check.
+    average_value = sum(totals_to_plot) / len(totals_to_plot)
+    print(
+        f"total removed per TS: mean {average_value:.2f}, median {median_value:.0f}, "
+        f"max {worst_case}, {number_of_tilt_series}/{number_of_tilt_series} TS with >=1 removed"
+    )
 
 
+# This just means "if this file is run directly, call main()". It's a
+# standard Python convention and can be ignored.
 if __name__ == "__main__":
     main()
