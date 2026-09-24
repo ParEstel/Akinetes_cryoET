@@ -2,13 +2,17 @@
 plot_tilt_removal_histogram.py
 ===============================
 
-Histogram of tilt images removed per tilt-series (TS), broken down by the
-two removal reasons used in this project's AreTomo3 preprocessing:
+Histogram of TOTAL tilt images removed per tilt-series (TS) in this
+project's AreTomo3 preprocessing -- combining both removal reasons into
+one per-TS count:
 
     - dark images   (AreTomo3's own `-DarkTol` frame exclusion)
     - low overlap   (post-alignment frames whose overlap with neighbouring
                       tilts fell below the QC threshold -- 80% in this
                       project)
+
+Styled to match the lab's existing "Removed tilts" QC panel: plain grey
+bars, a dashed vertical line at the median, x-axis ticked every 3 tilts.
 
 DATA SOURCE, CONFIRMED AGAINST THIS PROJECT'S OWN FILES
 --------------------------------------------------------
@@ -28,8 +32,9 @@ project's actual QC setting, not an assumed default. That block's
 Dark frames are excluded by AreTomo3 before overlap is even computed (see
 the per-series `.aln` files' `# DarkFrame = ...` header lines vs. this
 project's `flagged_frames.tsv` -- no section index appears in both), so
-`n_dark` and `n_bad` are counting disjoint sets of frames and can be
-summed to a per-TS total without double-counting.
+`n_dark` and `n_bad` are counting disjoint sets of frames and are summed
+here (`n_dark + n_bad`) into one total-removed-per-TS count without
+double-counting.
 
 USAGE
 -----
@@ -46,10 +51,8 @@ import matplotlib
 matplotlib.use("Agg")  # safe on a headless HPC node; still writes the PNG fine
 import matplotlib.pyplot as plt
 
-# Categorical palette slots 1 (blue) and 2 (orange) -- validated colorblind-
-# safe pair (fixed order, not cycled), from this project's dataviz palette.
-COLOR_DARK = "#2a78d6"
-COLOR_OVERLAP = "#eb6834"
+BAR_COLOR = "#808080"
+MEDIAN_COLOR = "#000000"
 
 
 def load_per_ts_qc(path):
@@ -74,41 +77,33 @@ def main(argv=None):
     args = p.parse_args(argv)
 
     qc, threshold = load_per_ts_qc(args.i)
-    n_dark = np.array([ts["n_dark"] for ts in qc])
-    n_bad = np.array([ts["n_bad"] for ts in qc])
-    n_ts = len(qc)
+    total_removed_all = np.array([ts["n_dark"] + ts["n_bad"] for ts in qc])
+    # Only TS with >=1 removed tilt are plotted/counted, matching this lab's
+    # existing "Removed tilts (n=... TS)" QC panel convention.
+    total_removed = total_removed_all[total_removed_all > 0]
+    n_ts = len(total_removed)
+    median = np.median(total_removed)
 
-    max_count = int(max(n_dark.max(), n_bad.max()))
-    x = np.arange(0, max_count + 1)
-    dark_counts = np.bincount(n_dark, minlength=max_count + 1)
-    bad_counts = np.bincount(n_bad, minlength=max_count + 1)
+    max_count = int(total_removed.max())
+    bins = np.arange(0, max_count + 2) - 0.5  # integer-centred bins, one per tilt count
 
-    # Grouped (not overlaid) bars -- overlapping semi-transparent fills would
-    # blend the two categorical colors into a muddy third color and hurt
-    # legibility, so each tilt-count gets two side-by-side bars with a small
-    # gap between them instead.
-    width = 0.4
-    fig, ax = plt.subplots(figsize=(11, 5.5))
-    ax.bar(x - width / 2, dark_counts, width=width * 0.92, color=COLOR_DARK,
-           label=f"dark images (n_dark, {int((n_dark > 0).sum())}/{n_ts} TS affected)")
-    ax.bar(x + width / 2, bad_counts, width=width * 0.92, color=COLOR_OVERLAP,
-           label=f"overlap < {threshold:.0f}% (n_bad, {int((n_bad > 0).sum())}/{n_ts} TS affected)")
+    fig, ax = plt.subplots(figsize=(5, 4))
+    ax.hist(total_removed, bins=bins, color=BAR_COLOR, edgecolor="black", linewidth=0.5)
+    ax.axvline(median, color=MEDIAN_COLOR, linestyle="--", linewidth=1.2,
+               label=f"Median = {median:.0f}")
 
-    ax.set_xlabel("Tilt images removed per tilt-series")
+    ax.set_xlabel("Tilts removed per TS")
     ax.set_ylabel("Number of tilt-series")
-    ax.set_title(f"Tilts removed per TS -- dark images vs. overlap < {threshold:.0f}% (n={n_ts} TS)")
+    ax.set_title(f"Removed tilts\n(n={n_ts} TS, thresh={threshold:.0f}%)")
     ax.set_xlim(-1, max_count + 1)
-    ax.set_xticks(x[::2] if max_count > 20 else x)
-    ax.legend()
-    ax.grid(alpha=0.3, axis="y")
+    ax.set_xticks(np.arange(0, max_count + 1, 3))
+    ax.legend(frameon=False)
 
     fig.tight_layout()
     fig.savefig(args.o, dpi=200)
     print(f"Saved plot to {args.o}")
-    print(f"dark images   : mean {n_dark.mean():.2f}, median {np.median(n_dark):.0f}, "
-          f"max {n_dark.max()}, {(n_dark > 0).sum()}/{n_ts} TS with >=1 removed")
-    print(f"overlap<{threshold:.0f}%  : mean {n_bad.mean():.2f}, median {np.median(n_bad):.0f}, "
-          f"max {n_bad.max()}, {(n_bad > 0).sum()}/{n_ts} TS with >=1 flagged")
+    print(f"total removed per TS: mean {total_removed.mean():.2f}, median {median:.0f}, "
+          f"max {max_count}, {(total_removed > 0).sum()}/{n_ts} TS with >=1 removed")
 
 
 if __name__ == "__main__":
